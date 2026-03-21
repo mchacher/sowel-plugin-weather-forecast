@@ -118,23 +118,12 @@ interface IntegrationPlugin {
 // ============================================================
 
 interface OpenMeteoResponse {
-  current: {
-    temperature_2m: number;
-    relative_humidity_2m: number;
-    apparent_temperature: number;
-    precipitation: number;
-    weather_code: number;
-    cloud_cover: number;
-    wind_speed_10m: number;
-    wind_gusts_10m: number;
-    uv_index: number;
-    direct_radiation: number;
-  };
   daily: {
-    temperature_2m_max: number[];
+    weather_code: number[];
     temperature_2m_min: number[];
-    precipitation_sum: number[];
+    temperature_2m_max: number[];
     precipitation_probability_max: number[];
+    wind_gusts_10m_max: number[];
   };
 }
 
@@ -183,26 +172,27 @@ function mapWeatherCode(code: number): WeatherCondition {
 // Discovered device definition (static)
 // ============================================================
 
+const FORECAST_DAYS = 5;
+
+function buildForecastDataDefs(): DiscoveredDevice["data"] {
+  const data: DiscoveredDevice["data"] = [];
+  for (let i = 1; i <= FORECAST_DAYS; i++) {
+    data.push(
+      { key: `j${i}_condition`, type: "enum", category: "weather_condition" },
+      { key: `j${i}_temp_min`, type: "number", category: "temperature", unit: "°C" },
+      { key: `j${i}_temp_max`, type: "number", category: "temperature", unit: "°C" },
+      { key: `j${i}_rain_prob`, type: "number", category: "rain", unit: "%" },
+      { key: `j${i}_wind_gusts`, type: "number", category: "wind", unit: "km/h" },
+    );
+  }
+  return data;
+}
+
 const WEATHER_DISCOVERED_DEVICE: DiscoveredDevice = {
   friendlyName: "Weather Forecast",
   manufacturer: "Open-Meteo",
   model: "Forecast API",
-  data: [
-    { key: "condition", type: "enum", category: "weather_condition" },
-    { key: "temperature", type: "number", category: "temperature", unit: "°C" },
-    { key: "feels_like", type: "number", category: "temperature", unit: "°C" },
-    { key: "humidity", type: "number", category: "humidity", unit: "%" },
-    { key: "precipitation", type: "number", category: "rain", unit: "mm" },
-    { key: "precipitation_probability", type: "number", category: "rain", unit: "%" },
-    { key: "wind_speed", type: "number", category: "wind", unit: "km/h" },
-    { key: "wind_gusts", type: "number", category: "wind", unit: "km/h" },
-    { key: "uv_index", type: "number", category: "uv" },
-    { key: "cloud_cover", type: "number", category: "generic", unit: "%" },
-    { key: "solar_radiation", type: "number", category: "solar_radiation", unit: "W/m²" },
-    { key: "forecast_temp_min", type: "number", category: "temperature", unit: "°C" },
-    { key: "forecast_temp_max", type: "number", category: "temperature", unit: "°C" },
-    { key: "forecast_rain_today", type: "number", category: "rain", unit: "mm" },
-  ],
+  data: buildForecastDataDefs(),
   orders: [],
 };
 
@@ -353,26 +343,15 @@ class WeatherForecastPlugin implements IntegrationPlugin {
       // Upsert device definition
       this.deviceManager.upsertFromDiscovery(PLUGIN_ID, SOURCE_DEVICE_ID, WEATHER_DISCOVERED_DEVICE);
 
-      // Map condition
-      const condition = mapWeatherCode(data.current.weather_code);
-
-      // Build payload
-      const payload: Record<string, unknown> = {
-        condition,
-        temperature: data.current.temperature_2m,
-        feels_like: data.current.apparent_temperature,
-        humidity: data.current.relative_humidity_2m,
-        precipitation: data.current.precipitation,
-        precipitation_probability: data.daily.precipitation_probability_max[0],
-        wind_speed: data.current.wind_speed_10m,
-        wind_gusts: data.current.wind_gusts_10m,
-        uv_index: data.current.uv_index,
-        cloud_cover: data.current.cloud_cover,
-        solar_radiation: data.current.direct_radiation,
-        forecast_temp_min: data.daily.temperature_2m_min[0],
-        forecast_temp_max: data.daily.temperature_2m_max[0],
-        forecast_rain_today: data.daily.precipitation_sum[0],
-      };
+      // Build payload — J+1 to J+5 (daily index 1..5, index 0 = today)
+      const payload: Record<string, unknown> = {};
+      for (let i = 1; i <= FORECAST_DAYS; i++) {
+        payload[`j${i}_condition`] = mapWeatherCode(data.daily.weather_code[i]);
+        payload[`j${i}_temp_min`] = data.daily.temperature_2m_min[i];
+        payload[`j${i}_temp_max`] = data.daily.temperature_2m_max[i];
+        payload[`j${i}_rain_prob`] = data.daily.precipitation_probability_max[i];
+        payload[`j${i}_wind_gusts`] = data.daily.wind_gusts_10m_max[i];
+      }
 
       // Update device data
       this.deviceManager.updateDeviceData(PLUGIN_ID, SOURCE_DEVICE_ID, payload);
@@ -380,10 +359,9 @@ class WeatherForecastPlugin implements IntegrationPlugin {
       this.lastPollAt = new Date().toISOString();
       this.logger.info(
         {
-          condition,
-          temperature: data.current.temperature_2m,
-          humidity: data.current.relative_humidity_2m,
-          windSpeed: data.current.wind_speed_10m,
+          j1: mapWeatherCode(data.daily.weather_code[1]),
+          j1_temp: `${data.daily.temperature_2m_min[1]}/${data.daily.temperature_2m_max[1]}°C`,
+          j1_rain: `${data.daily.precipitation_probability_max[1]}%`,
         },
         "Weather Forecast poll complete",
       );
@@ -401,10 +379,9 @@ class WeatherForecastPlugin implements IntegrationPlugin {
     const params = new URLSearchParams({
       latitude: lat,
       longitude: lon,
-      current: "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,cloud_cover,wind_speed_10m,wind_gusts_10m,uv_index,direct_radiation",
-      daily: "temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max",
+      daily: "weather_code,temperature_2m_min,temperature_2m_max,precipitation_probability_max,wind_gusts_10m_max",
       timezone: "auto",
-      forecast_days: "1",
+      forecast_days: String(FORECAST_DAYS + 1), // +1 because index 0 = today, we want J+1 to J+5
     });
 
     const url = `${OPEN_METEO_BASE_URL}?${params.toString()}`;
@@ -418,8 +395,8 @@ class WeatherForecastPlugin implements IntegrationPlugin {
     const data = (await res.json()) as OpenMeteoResponse;
 
     // Validate response structure
-    if (!data.current || !data.daily) {
-      throw new Error("Invalid Open-Meteo API response: missing current or daily data");
+    if (!data.daily) {
+      throw new Error("Invalid Open-Meteo API response: missing daily data");
     }
 
     return data;
