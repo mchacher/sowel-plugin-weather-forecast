@@ -159,7 +159,7 @@ const PLUGIN_ID = "weather-forecast";
 const SETTINGS_PREFIX = `integration.${PLUGIN_ID}.`;
 const OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1/forecast";
 const REQUEST_TIMEOUT_MS = 30_000;
-const SOURCE_DEVICE_ID = "open-meteo";
+const SOURCE_DEVICE_ID = "Weather Forecast"; // Must match friendlyName for updateDeviceData lookup
 const MIN_POLL_INTERVAL_MIN = 15;
 const DEFAULT_POLL_INTERVAL_MIN = 30;
 
