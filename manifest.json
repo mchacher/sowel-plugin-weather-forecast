@@ -1,7 +1,7 @@
 {
   "id": "weather-forecast",
   "name": "Weather Forecast",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Weather forecast via Open-Meteo API (free, no API key)",
   "icon": "CloudSun",
   "author": "mchacher",
