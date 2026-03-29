@@ -1,6 +1,6 @@
 {
   "name": "sowel-plugin-weather-forecast",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Sowel plugin: Weather forecast via Open-Meteo API",
   "type": "module",
   "main": "dist/index.js",
