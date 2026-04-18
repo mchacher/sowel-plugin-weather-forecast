@@ -2,12 +2,12 @@
   "id": "weather-forecast",
   "type": "integration",
   "name": "Weather Forecast",
-  "version": "0.5.0",
+  "version": "1.0.0",
   "description": "Weather forecast via Open-Meteo API (free, no API key)",
   "icon": "CloudSun",
   "repo": "mchacher/sowel-plugin-weather-forecast",
   "author": "mchacher",
-  "sowelVersion": ">=0.10.0",
+  "sowelVersion": ">=1.2.11",
   "settings": [
     {
       "key": "polling_interval",
@@ -17,5 +17,6 @@
       "defaultValue": "30",
       "placeholder": "Min 15, default 30"
     }
-  ]
+  ],
+  "apiVersion": 2
 }

@@ -45,7 +45,7 @@ interface DiscoveredDevice {
   orders: {
     key: string;
     type: string;
-    dispatchConfig: Record<string, unknown>;
+    dispatchConfig?: Record<string, unknown>;
     min?: number;
     max?: number;
     enumValues?: string[];
@@ -99,6 +99,7 @@ interface IntegrationPlugin {
   readonly name: string;
   readonly description: string;
   readonly icon: string;
+  readonly apiVersion?: number;
   getStatus(): IntegrationStatus;
   isConfigured(): boolean;
   getSettingsSchema(): IntegrationSettingDef[];
@@ -106,7 +107,7 @@ interface IntegrationPlugin {
   stop(): Promise<void>;
   executeOrder(
     device: Device,
-    dispatchConfig: Record<string, unknown>,
+    orderKeyOrDispatchConfig: string | Record<string, unknown>,
     value: unknown,
   ): Promise<void>;
   refresh?(): Promise<void>;
@@ -179,8 +180,8 @@ function buildForecastDataDefs(): DiscoveredDevice["data"] {
   for (let i = 1; i <= FORECAST_DAYS; i++) {
     data.push(
       { key: `j${i}_condition`, type: "enum", category: "weather_condition" },
-      { key: `j${i}_temp_min`, type: "number", category: "temperature", unit: "°C" },
-      { key: `j${i}_temp_max`, type: "number", category: "temperature", unit: "°C" },
+      { key: `j${i}_temp_min`, type: "number", category: "temperature_outdoor", unit: "°C" },
+      { key: `j${i}_temp_max`, type: "number", category: "temperature_outdoor", unit: "°C" },
       { key: `j${i}_rain_prob`, type: "number", category: "rain", unit: "%" },
       { key: `j${i}_wind_gusts`, type: "number", category: "wind", unit: "km/h" },
     );
@@ -205,6 +206,7 @@ class WeatherForecastPlugin implements IntegrationPlugin {
   readonly name = "Weather Forecast";
   readonly description = "Weather forecast via Open-Meteo API";
   readonly icon = "CloudSun";
+  readonly apiVersion = 2;
 
   private logger: Logger;
   private eventBus: EventBus;
@@ -314,7 +316,7 @@ class WeatherForecastPlugin implements IntegrationPlugin {
 
   async executeOrder(
     _device: Device,
-    _dispatchConfig: Record<string, unknown>,
+    _orderKey: string,
     _value: unknown,
   ): Promise<void> {
     throw new Error("Weather Forecast plugin does not support orders");
