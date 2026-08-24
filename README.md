@@ -40,7 +40,7 @@ deterministic run can give:
 
 ## Data Provided
 
-Creates a single "Weather Forecast" device with 32 data points.
+Creates a single "Weather Forecast" device with 36 data points.
 
 | Data | Type | Unit | Description |
 |---|---|---|---|
@@ -49,13 +49,14 @@ Creates a single "Weather Forecast" device with 32 data points.
 | `j1_temp_max` … `j5_temp_max` | number | °C | Daily maximum |
 | `j1_rain_prob` … `j5_rain_prob` | number | % | Share of ensemble members reaching 0.5 mm |
 | `j1_wind_gusts` … `j5_wind_gusts` | number | km/h | Daily maximum gust |
-| `j1_temp_max_spread` … `j3_temp_max_spread` | number | °C | Full width of the uncertainty band |
-| `j1_confidence` … `j3_confidence` | enum | — | high, medium, low |
+| `j1_temp_max_spread` … `j5_temp_max_spread` | number | °C | Full width of the uncertainty band |
+| `j1_confidence` … `j5_confidence` | enum | — | high, medium, low |
 | `model_used` | text | — | The model that fed J+1, or `median(n)` |
 
 `jN` is the horizon in days: `j1` is tomorrow, `j5` is in five days. Confidence
-is published for the first three days only; beyond that the spread is wide
-enough that it would read `low` permanently and carry no information.
+is published for every day. It is not monotonic with the horizon: measured on
+one run, J+4 came out `low` on an 8.5 °C band while J+5 was `medium` on 3.5 °C,
+so the far days carry real information rather than a foregone verdict.
 
 The five original metrics keep the key, type, category and unit they had in
 1.0.0, so upgrading changes what is behind the numbers, never the bindings.

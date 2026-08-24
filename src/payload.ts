@@ -14,11 +14,16 @@ import { resolveCategoricalDay, resolveDay } from "./models.js";
 export const FORECAST_DAYS = 5;
 
 /**
- * Confidence is published for the first three days only. Beyond J+3 the spread
- * is wide enough that the index would read `low` permanently, which carries no
- * information.
+ * Confidence is published for every forecast day.
+ *
+ * It was limited to three days on the grounds that J+4 and J+5 would read `low`
+ * permanently and carry no information. The opposite turned out to be true once
+ * it reached a card: a day with no index reads as a bug, while a day that says
+ * "unreliable" teaches that a five-day forecast is not something to act on.
+ * Being consistently pessimistic that far out is the honest answer, not a
+ * degenerate one.
  */
-export const CONFIDENCE_DAYS = 3;
+export const CONFIDENCE_DAYS = FORECAST_DAYS;
 
 export type WeatherCondition =
   | "sunny"

@@ -168,11 +168,20 @@ describe("buildForecastPayload", () => {
     expect(value).toBeLessThanOrEqual(Math.max(...spreadOfDay3));
   });
 
-  it("publishes a confidence level for the first three days only", () => {
+  it("publishes a confidence level for every forecast day", () => {
     const payload = buildForecastPayload(france(), members(), DEFAULT_THRESHOLDS);
-    expect(["high", "medium", "low"]).toContain(payload.j1_confidence);
-    expect(payload).not.toHaveProperty("j4_confidence");
-    expect(payload).not.toHaveProperty("j5_confidence");
+    for (let d = 1; d <= FORECAST_DAYS; d++) {
+      expect(["high", "medium", "low"]).toContain(payload[`j${d}_confidence`]);
+    }
+  });
+
+  it("still reports a level on the far days, where fewer models answer", () => {
+    // AROME and the other short-horizon models are gone by J+5, so the level
+    // rests on the ensemble band alone. It must still be published rather than
+    // silently dropped, which on a card reads as a bug.
+    const payload = buildForecastPayload(france(), members(), DEFAULT_THRESHOLDS);
+    expect(payload.j5_confidence).not.toBeNull();
+    expect(payload.j5_temp_max_spread).toBeTypeOf("number");
   });
 
   it("still publishes every alias without an ensemble, confidence included", () => {
