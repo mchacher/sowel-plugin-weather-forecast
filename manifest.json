@@ -2,7 +2,7 @@
   "id": "weather-forecast",
   "type": "integration",
   "name": "Weather Forecast",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Weather forecast via Open-Meteo, resolved across every model covering the home, with an ensemble-based rain probability and confidence",
   "icon": "CloudSun",
   "repo": "mchacher/sowel-plugin-weather-forecast",
