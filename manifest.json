@@ -2,8 +2,8 @@
   "id": "weather-forecast",
   "type": "integration",
   "name": "Weather Forecast",
-  "version": "1.0.0",
-  "description": "Weather forecast via Open-Meteo API (free, no API key)",
+  "version": "2.0.0",
+  "description": "Weather forecast via Open-Meteo, resolved across every model covering the home, with an ensemble-based rain probability and confidence",
   "icon": "CloudSun",
   "repo": "mchacher/sowel-plugin-weather-forecast",
   "author": "mchacher",
@@ -16,6 +16,29 @@
       "required": false,
       "defaultValue": "30",
       "placeholder": "Min 15, default 30"
+    },
+    {
+      "key": "models",
+      "label": "Weather models",
+      "type": "text",
+      "required": false,
+      "placeholder": "Empty = automatic. Use best_match for the pre-2.0 behaviour"
+    },
+    {
+      "key": "confidence_high_max",
+      "label": "High confidence below (°C of spread)",
+      "type": "number",
+      "required": false,
+      "defaultValue": "2",
+      "placeholder": "Default 2"
+    },
+    {
+      "key": "confidence_medium_max",
+      "label": "Medium confidence below (°C of spread)",
+      "type": "number",
+      "required": false,
+      "defaultValue": "5",
+      "placeholder": "Default 5"
     }
   ],
   "apiVersion": 2

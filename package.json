@@ -1,15 +1,20 @@
 {
   "name": "sowel-plugin-weather-forecast",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Sowel plugin: Weather forecast via Open-Meteo API",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json"
   },
   "devDependencies": {
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.9",
+    "@types/node": "^22.0.0"
   },
   "license": "AGPL-3.0"
 }
