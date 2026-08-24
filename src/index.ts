@@ -1,10 +1,33 @@
 /**
  * Sowel Plugin — Weather Forecast
  *
- * Provides current weather conditions and daily forecast data
- * via the Open-Meteo API (free, no API key required).
- * Creates a single device with 14 data points.
+ * Provides a daily forecast via the Open-Meteo API (free, no API key required).
+ *
+ * Since v2.0 (spec 159) the deterministic call carries a superset of models and
+ * each daily value is resolved from the best model available for that day, while
+ * a second call to the ensemble endpoint yields a genuine rain probability and a
+ * per-day confidence. The 25 historical `jN_*` aliases are unchanged.
  */
+
+import { CANDIDATE_MODELS, ENSEMBLE_MODEL } from "./models.js";
+import { DEFAULT_THRESHOLDS, type ConfidenceThresholds } from "./confidence.js";
+import { CONFIDENCE_DAYS, FORECAST_DAYS, buildForecastPayload } from "./payload.js";
+import {
+  DEFAULT_POLL_INTERVAL_MIN,
+  parseModelsSetting,
+  parsePollingInterval,
+  parseThresholds,
+} from "./settings.js";
+import {
+  IMPLICIT_MODEL,
+  buildDailyUrl,
+  buildEnsembleUrl,
+  parseDaily,
+  parseEnsembleDaily,
+  parseJsonLenient,
+  type DailyResponse,
+  type EnsembleResponse,
+} from "./open-meteo.js";
 
 // ============================================================
 // Local type definitions (no imports from Sowel source)
@@ -115,65 +138,17 @@ interface IntegrationPlugin {
 }
 
 // ============================================================
-// Open-Meteo API types
-// ============================================================
-
-interface OpenMeteoResponse {
-  daily: {
-    weather_code: number[];
-    temperature_2m_min: number[];
-    temperature_2m_max: number[];
-    precipitation_probability_max: number[];
-    wind_gusts_10m_max: number[];
-  };
-}
-
-// ============================================================
-// Weather condition type
-// ============================================================
-
-type WeatherCondition =
-  | "sunny"
-  | "partly_cloudy"
-  | "cloudy"
-  | "foggy"
-  | "rainy"
-  | "snowy"
-  | "stormy";
-
-// ============================================================
 // Constants
 // ============================================================
 
 const PLUGIN_ID = "weather-forecast";
 const SETTINGS_PREFIX = `integration.${PLUGIN_ID}.`;
-const OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1/forecast";
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOURCE_DEVICE_ID = "Weather Forecast"; // Must match friendlyName for updateDeviceData lookup
-const MIN_POLL_INTERVAL_MIN = 15;
-const DEFAULT_POLL_INTERVAL_MIN = 30;
-
-// ============================================================
-// WMO weather code mapping
-// ============================================================
-
-function mapWeatherCode(code: number): WeatherCondition {
-  if (code === 0) return "sunny";
-  if (code === 1 || code === 2) return "partly_cloudy";
-  if (code === 3) return "cloudy";
-  if (code === 45 || code === 48) return "foggy";
-  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "rainy";
-  if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return "snowy";
-  if (code >= 95 && code <= 99) return "stormy";
-  // Fallback for unknown codes
-  return "cloudy";
-}
 
 // ============================================================
 // Discovered device definition (static)
 // ============================================================
-
-const FORECAST_DAYS = 5;
 
 function buildForecastDataDefs(): DiscoveredDevice["data"] {
   const data: DiscoveredDevice["data"] = [];
@@ -186,6 +161,20 @@ function buildForecastDataDefs(): DiscoveredDevice["data"] {
       { key: `j${i}_wind_gusts`, type: "number", category: "wind", unit: "km/h" },
     );
   }
+  for (let i = 1; i <= CONFIDENCE_DAYS; i++) {
+    data.push(
+      {
+        key: `j${i}_temp_max_spread`,
+        type: "number",
+        category: "temperature_outdoor",
+        unit: "°C",
+      },
+      // `generic`, not a weather category: this is metadata about the forecast,
+      // and it must not be aggregated by zones or historised as a measurement.
+      { key: `j${i}_confidence`, type: "enum", category: "generic" },
+    );
+  }
+  data.push({ key: "model_used", type: "text", category: "generic" });
   return data;
 }
 
@@ -217,6 +206,10 @@ class WeatherForecastPlugin implements IntegrationPlugin {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private lastPollAt: string | null = null;
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MIN * 60 * 1000;
+
+  // Resolution state (spec 159)
+  private models: readonly string[] = CANDIDATE_MODELS;
+  private thresholds: ConfidenceThresholds = DEFAULT_THRESHOLDS;
 
   // Connection state
   private status: IntegrationStatus = "disconnected";
@@ -256,6 +249,29 @@ class WeatherForecastPlugin implements IntegrationPlugin {
         defaultValue: "30",
         placeholder: "Min 15, default 30",
       },
+      {
+        key: "models",
+        label: "Weather models",
+        type: "text",
+        required: false,
+        placeholder: "Empty = automatic. Use best_match for the pre-2.0 behaviour",
+      },
+      {
+        key: "confidence_high_max",
+        label: "High confidence below (°C of spread)",
+        type: "number",
+        required: false,
+        defaultValue: "2",
+        placeholder: "Default 2",
+      },
+      {
+        key: "confidence_medium_max",
+        label: "Medium confidence below (°C of spread)",
+        type: "number",
+        required: false,
+        defaultValue: "5",
+        placeholder: "Default 5",
+      },
     ];
   }
 
@@ -274,15 +290,12 @@ class WeatherForecastPlugin implements IntegrationPlugin {
     }
 
     // Read polling interval from settings
-    const rawInterval = parseInt(
-      this.settingsManager.get(`${SETTINGS_PREFIX}polling_interval`) ?? String(DEFAULT_POLL_INTERVAL_MIN),
-      10,
-    );
-    const pollingIntervalMin = Math.max(
-      MIN_POLL_INTERVAL_MIN,
-      isNaN(rawInterval) ? DEFAULT_POLL_INTERVAL_MIN : rawInterval,
+    const pollingIntervalMin = parsePollingInterval(
+      this.settingsManager.get(`${SETTINGS_PREFIX}polling_interval`),
     );
     this.pollIntervalMs = pollingIntervalMin * 60 * 1000;
+    this.models = this.readModelsSetting();
+    this.thresholds = this.readThresholds();
 
     try {
       // Initial poll
@@ -328,6 +341,30 @@ class WeatherForecastPlugin implements IntegrationPlugin {
   }
 
   // ============================================================
+  // Settings parsing
+  // ============================================================
+
+  private readModelsSetting(): readonly string[] {
+    const { models, unknown } = parseModelsSetting(
+      this.settingsManager.get(`${SETTINGS_PREFIX}models`),
+    );
+    if (unknown.length > 0) {
+      this.logger.warn(
+        { unknown, kept: models.length },
+        "Unknown model ids in the `models` setting, ignored",
+      );
+    }
+    return models;
+  }
+
+  private readThresholds(): ConfidenceThresholds {
+    return parseThresholds(
+      this.settingsManager.get(`${SETTINGS_PREFIX}confidence_high_max`),
+      this.settingsManager.get(`${SETTINGS_PREFIX}confidence_medium_max`),
+    );
+  }
+
+  // ============================================================
   // Polling
   // ============================================================
 
@@ -340,30 +377,26 @@ class WeatherForecastPlugin implements IntegrationPlugin {
     }
 
     try {
-      const data = await this.fetchForecast(lat, lon);
+      const daily = await this.fetchDaily(lat, lon);
+      // A failed ensemble degrades the forecast, it never fails the poll.
+      const ensemble = await this.fetchEnsembleSafely(lat, lon);
 
-      // Upsert device definition
       this.deviceManager.upsertFromDiscovery(PLUGIN_ID, SOURCE_DEVICE_ID, WEATHER_DISCOVERED_DEVICE);
 
-      // Build payload — J+1 to J+5 (daily index 1..5, index 0 = today)
-      const payload: Record<string, unknown> = {};
-      for (let i = 1; i <= FORECAST_DAYS; i++) {
-        payload[`j${i}_condition`] = mapWeatherCode(data.daily.weather_code[i]);
-        payload[`j${i}_temp_min`] = data.daily.temperature_2m_min[i];
-        payload[`j${i}_temp_max`] = data.daily.temperature_2m_max[i];
-        payload[`j${i}_rain_prob`] = data.daily.precipitation_probability_max[i];
-        payload[`j${i}_wind_gusts`] = data.daily.wind_gusts_10m_max[i];
-      }
-
-      // Update device data
+      const payload = buildForecastPayload(daily, ensemble, this.thresholds);
       this.deviceManager.updateDeviceData(PLUGIN_ID, SOURCE_DEVICE_ID, payload);
 
       this.lastPollAt = new Date().toISOString();
       this.logger.info(
         {
-          j1: mapWeatherCode(data.daily.weather_code[1]),
-          j1_temp: `${data.daily.temperature_2m_min[1]}/${data.daily.temperature_2m_max[1]}°C`,
-          j1_rain: `${data.daily.precipitation_probability_max[1]}%`,
+          models: Object.keys(daily.byModel).length,
+          modelUsed: payload.model_used,
+          ensemble: ensemble !== null,
+          j1Condition: payload.j1_condition,
+          j1TempMin: payload.j1_temp_min,
+          j1TempMax: payload.j1_temp_max,
+          j1RainProb: payload.j1_rain_prob,
+          j1Confidence: payload.j1_confidence,
         },
         "Weather Forecast poll complete",
       );
@@ -377,31 +410,52 @@ class WeatherForecastPlugin implements IntegrationPlugin {
   // Open-Meteo API
   // ============================================================
 
-  private async fetchForecast(lat: string, lon: string): Promise<OpenMeteoResponse> {
-    const params = new URLSearchParams({
-      latitude: lat,
-      longitude: lon,
-      daily: "weather_code,temperature_2m_min,temperature_2m_max,precipitation_probability_max,wind_gusts_10m_max",
-      timezone: "auto",
-      forecast_days: String(FORECAST_DAYS + 1), // +1 because index 0 = today, we want J+1 to J+5
-    });
-
-    const url = `${OPEN_METEO_BASE_URL}?${params.toString()}`;
+  private async fetchJson(url: string): Promise<unknown> {
     const res = await this.fetchWithTimeout(url, { method: "GET" });
-
+    const body = await res.text();
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Open-Meteo API request failed (${res.status}): ${text}`);
+      throw new Error(`Open-Meteo request failed (${res.status}): ${body.slice(0, 200)}`);
     }
+    return parseJsonLenient(body);
+  }
 
-    const data = (await res.json()) as OpenMeteoResponse;
-
-    // Validate response structure
-    if (!data.daily) {
-      throw new Error("Invalid Open-Meteo API response: missing daily data");
+  /**
+   * The multi-model call, with one retry on `best_match`.
+   *
+   * Open-Meteo rejects the *whole* request when a single model id is unknown, so
+   * a stale candidate list or a bad `models` setting would otherwise take the
+   * forecast down entirely. The retry keeps the plugin on the pre-2.0 behaviour
+   * instead.
+   */
+  private async fetchDaily(lat: string, lon: string): Promise<DailyResponse> {
+    const days = FORECAST_DAYS + 1; // index 0 is today
+    try {
+      return parseDaily(await this.fetchJson(buildDailyUrl(lat, lon, this.models, days)));
+    } catch (err) {
+      if (this.models.length === 0) throw err;
+      this.logger.warn(
+        { err, models: this.models.length },
+        "Multi-model forecast request failed, falling back to best_match",
+      );
+      return parseDaily(await this.fetchJson(buildDailyUrl(lat, lon, [], days)));
     }
+  }
 
-    return data;
+  /** Never throws: the ensemble is an enrichment, not a dependency. */
+  private async fetchEnsembleSafely(
+    lat: string,
+    lon: string,
+  ): Promise<EnsembleResponse | null> {
+    try {
+      const url = buildEnsembleUrl(lat, lon, ENSEMBLE_MODEL, FORECAST_DAYS + 1);
+      return parseEnsembleDaily(await this.fetchJson(url));
+    } catch (err) {
+      this.logger.warn(
+        { err, model: ENSEMBLE_MODEL },
+        "Ensemble request failed, forecast continues without rain probability or confidence",
+      );
+      return null;
+    }
   }
 
   // ============================================================
