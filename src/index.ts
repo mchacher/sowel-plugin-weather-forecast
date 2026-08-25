@@ -22,6 +22,9 @@ import {
   IMPLICIT_MODEL,
   buildDailyUrl,
   buildEnsembleUrl,
+  buildHourlyUrl,
+  parseHourly,
+  type HourlyPoint,
   parseDaily,
   parseEnsembleDaily,
   parseJsonLenient,
@@ -145,6 +148,9 @@ const PLUGIN_ID = "weather-forecast";
 const SETTINGS_PREFIX = `integration.${PLUGIN_ID}.`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOURCE_DEVICE_ID = "Weather Forecast"; // Must match friendlyName for updateDeviceData lookup
+const IRRADIANCE_KEY = "irradiance_120h";
+/** Days of hourly irradiance published. 5 x 24 = 120 points, about 4.4 KB. */
+const IRRADIANCE_DAYS = 5;
 
 // ============================================================
 // Discovered device definition (static)
@@ -175,6 +181,10 @@ function buildForecastDataDefs(): DiscoveredDevice["data"] {
     );
   }
   data.push({ key: "model_used", type: "text", category: "generic" });
+  // Spec 160 — hourly irradiance for the PV production forecast. One `json`
+  // point rather than 360 flat bindings: it is a computation input, not
+  // something a household reads off a card.
+  data.push({ key: IRRADIANCE_KEY, type: "json", category: "solar_radiation" });
   return data;
 }
 
@@ -383,7 +393,23 @@ class WeatherForecastPlugin implements IntegrationPlugin {
 
       this.deviceManager.upsertFromDiscovery(PLUGIN_ID, SOURCE_DEVICE_ID, WEATHER_DISCOVERED_DEVICE);
 
-      const payload = buildForecastPayload(daily, ensemble, this.thresholds);
+      const payload: Record<string, unknown> = buildForecastPayload(
+        daily,
+        ensemble,
+        this.thresholds,
+      );
+
+      // The irradiance series is an enrichment like the ensemble: its absence
+      // costs the PV forecast downstream, never this poll.
+      const irradiance = await this.fetchHourlySafely(lat, lon);
+      if (irradiance) {
+        payload[IRRADIANCE_KEY] = {
+          issuedAt: new Date().toISOString(),
+          model: this.models.length === 1 ? this.models[0] : IMPLICIT_MODEL,
+          hours: irradiance,
+        };
+      }
+
       this.deviceManager.updateDeviceData(PLUGIN_ID, SOURCE_DEVICE_ID, payload);
 
       this.lastPollAt = new Date().toISOString();
@@ -397,6 +423,7 @@ class WeatherForecastPlugin implements IntegrationPlugin {
           j1TempMax: payload.j1_temp_max,
           j1RainProb: payload.j1_rain_prob,
           j1Confidence: payload.j1_confidence,
+          irradianceHours: irradiance?.length ?? 0,
         },
         "Weather Forecast poll complete",
       );
@@ -438,6 +465,29 @@ class WeatherForecastPlugin implements IntegrationPlugin {
         "Multi-model forecast request failed, falling back to best_match",
       );
       return parseDaily(await this.fetchJson(buildDailyUrl(lat, lon, [], days)));
+    }
+  }
+
+  /**
+   * Never throws: the series feeds a downstream consumer (spec 160), it is not
+   * needed by anything this plugin publishes itself.
+   *
+   * Single model on purpose, and `best_match` by default: a consumer projecting
+   * the beam onto a tilted plane needs one coherent series. Spec 160 measured
+   * that the irradiance forecast is not the accuracy bottleneck anyway.
+   */
+  private async fetchHourlySafely(lat: string, lon: string): Promise<HourlyPoint[] | null> {
+    try {
+      const model = this.models.length === 1 ? this.models[0] : "";
+      const url = buildHourlyUrl(lat, lon, model, IRRADIANCE_DAYS);
+      const hours = parseHourly(await this.fetchJson(url));
+      return hours.length > 0 ? hours : null;
+    } catch (err) {
+      this.logger.warn(
+        { err },
+        "Hourly irradiance request failed, forecast continues without the series",
+      );
+      return null;
     }
   }
 

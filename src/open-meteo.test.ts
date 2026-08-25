@@ -2,12 +2,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  HOURLY_VARIABLES,
   IMPLICIT_MODEL,
   OpenMeteoResponseError,
   buildDailyUrl,
   buildEnsembleUrl,
+  buildHourlyUrl,
   parseDaily,
   parseEnsembleDaily,
+  parseHourly,
   parseJsonLenient,
 } from "./open-meteo.js";
 
@@ -138,5 +141,77 @@ describe("parseEnsembleDaily", () => {
 
   it("throws a typed error on a payload with no daily block", () => {
     expect(() => parseEnsembleDaily({ latitude: 45 })).toThrow(OpenMeteoResponseError);
+  });
+});
+
+describe("buildHourlyUrl", () => {
+  it("asks for the three variables a plane projection needs", () => {
+    const url = new URL(buildHourlyUrl("45.17", "5.80", "", 5));
+    const hourly = url.searchParams.get("hourly");
+    for (const v of HOURLY_VARIABLES) expect(hourly).toContain(v);
+    expect(url.searchParams.get("forecast_days")).toBe("5");
+  });
+
+  it("never asks for the combined shortwave radiation", () => {
+    // The direct/diffuse split is the whole point: a combined figure cannot be
+    // projected onto a tilted plane.
+    expect(buildHourlyUrl("45.17", "5.80", "", 5)).not.toContain("shortwave");
+  });
+
+  it("omits the models parameter when none is forced", () => {
+    expect(new URL(buildHourlyUrl("45.17", "5.80", "", 5)).searchParams.has("models")).toBe(false);
+  });
+
+  it("passes a forced model through", () => {
+    const url = new URL(buildHourlyUrl("45.17", "5.80", "icon_eu", 5));
+    expect(url.searchParams.get("models")).toBe("icon_eu");
+  });
+});
+
+describe("parseHourly", () => {
+  it("flattens the captured payload into one point per hour", () => {
+    const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
+    expect(hours).toHaveLength(120);
+    for (const h of hours) {
+      expect(typeof h.t).toBe("string");
+      expect(typeof h.direct).toBe("number");
+      expect(typeof h.diffuse).toBe("number");
+      expect(typeof h.temp).toBe("number");
+    }
+  });
+
+  it("keeps the hours in order and spanning five days", () => {
+    const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
+    const days = new Set(hours.map((h) => h.t.slice(0, 10)));
+    expect(days.size).toBe(5);
+    expect(hours[0].t < hours[hours.length - 1].t).toBe(true);
+  });
+
+  it("reads radiation as zero at night rather than as missing", () => {
+    const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
+    const night = hours.find((h) => h.t.endsWith("T02:00"));
+    expect(night?.direct).toBe(0);
+    expect(night?.diffuse).toBe(0);
+  });
+
+  it("accepts a model-suffixed response", () => {
+    const hours = parseHourly({
+      hourly: {
+        time: ["2026-08-25T00:00"],
+        direct_radiation_icon_eu: [12],
+        diffuse_radiation_icon_eu: [34],
+        temperature_2m_icon_eu: [18],
+      },
+    });
+    expect(hours[0]).toEqual({ t: "2026-08-25T00:00", direct: 12, diffuse: 34, temp: 18 });
+  });
+
+  it("nulls a variable the response does not carry rather than throwing", () => {
+    const hours = parseHourly({ hourly: { time: ["a"], direct_radiation: [5] } });
+    expect(hours[0]).toEqual({ t: "a", direct: 5, diffuse: null, temp: null });
+  });
+
+  it("throws a typed error with no hourly block", () => {
+    expect(() => parseHourly({ latitude: 45 })).toThrow(OpenMeteoResponseError);
   });
 });
