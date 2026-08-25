@@ -23,6 +23,8 @@ import {
   buildDailyUrl,
   buildEnsembleUrl,
   buildHourlyUrl,
+  buildHistoryUrl,
+  daylightOnly,
   parseHourly,
   type HourlyPoint,
   parseDaily,
@@ -149,6 +151,22 @@ const SETTINGS_PREFIX = `integration.${PLUGIN_ID}.`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOURCE_DEVICE_ID = "Weather Forecast"; // Must match friendlyName for updateDeviceData lookup
 const IRRADIANCE_KEY = "irradiance_120h";
+
+/**
+ * The past irradiance a PV model can be fitted on straight away (spec 161).
+ *
+ * A separate point from the forward series, refreshed once a day rather than on
+ * every poll: 45 days of daylight hours is about 630 entries, and republishing
+ * that twice an hour alongside its `previous` value would put a quarter of a
+ * megabyte on the wire for data that changes when a day rolls over.
+ */
+const IRRADIANCE_HISTORY_KEY = "irradiance_history";
+
+/** Days of history published. Matches the core's rolling fit window. */
+const HISTORY_DAYS = 45;
+
+/** How often the history is refreshed. */
+const HISTORY_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /**
  * Calendar days of hourly irradiance published.
  *
@@ -195,6 +213,8 @@ function buildForecastDataDefs(): DiscoveredDevice["data"] {
   // logs a contract warning at every discovery and offers the series as a
   // binding candidate — the very friction this series exists to avoid.
   data.push({ key: IRRADIANCE_KEY, type: "json", category: "generic" });
+  // Spec 161 — the same shape, over the past instead of the future.
+  data.push({ key: IRRADIANCE_HISTORY_KEY, type: "json", category: "generic" });
   return data;
 }
 
@@ -225,6 +245,8 @@ class WeatherForecastPlugin implements IntegrationPlugin {
   // Polling state
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private lastPollAt: string | null = null;
+  /** When the 45-day history was last published, so it is refreshed daily. */
+  private lastHistoryAt = 0;
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MIN * 60 * 1000;
 
   // Resolution state (spec 159)
@@ -420,6 +442,20 @@ class WeatherForecastPlugin implements IntegrationPlugin {
         };
       }
 
+      // Spec 161 — the past series, at most once a day. Its absence costs a
+      // household the ability to fit a model straight away, never this poll.
+      if (Date.now() - this.lastHistoryAt >= HISTORY_INTERVAL_MS) {
+        const history = await this.fetchHistorySafely(lat, lon);
+        if (history) {
+          payload[IRRADIANCE_HISTORY_KEY] = {
+            issuedAt: new Date().toISOString(),
+            model: this.models.length === 1 ? this.models[0] : IMPLICIT_MODEL,
+            hours: history,
+          };
+          this.lastHistoryAt = Date.now();
+        }
+      }
+
       this.deviceManager.updateDeviceData(PLUGIN_ID, SOURCE_DEVICE_ID, payload);
 
       this.lastPollAt = new Date().toISOString();
@@ -496,6 +532,27 @@ class WeatherForecastPlugin implements IntegrationPlugin {
       this.logger.warn(
         { err },
         "Hourly irradiance request failed, forecast continues without the series",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * The past 45 days of daylight irradiance (spec 161).
+   *
+   * Never throws, for the same reason as its forward twin: a household that
+   * cannot reach Open-Meteo for the history still gets today's forecast.
+   */
+  private async fetchHistorySafely(lat: string, lon: string): Promise<HourlyPoint[] | null> {
+    try {
+      const model = this.models.length === 1 ? this.models[0] : "";
+      const url = buildHistoryUrl(lat, lon, model, HISTORY_DAYS);
+      const hours = daylightOnly(parseHourly(await this.fetchJson(url)));
+      return hours.length > 0 ? hours : null;
+    } catch (err) {
+      this.logger.warn(
+        { err },
+        "Irradiance history request failed, the forecast is unaffected",
       );
       return null;
     }

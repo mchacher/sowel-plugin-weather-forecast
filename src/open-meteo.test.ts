@@ -12,6 +12,8 @@ import {
   parseEnsembleDaily,
   parseHourly,
   parseJsonLenient,
+  buildHistoryUrl,
+  daylightOnly,
 } from "./open-meteo.js";
 
 function fixture(name: string): string {
@@ -251,5 +253,57 @@ describe("parseHourly", () => {
 
   it("throws a typed error with no hourly block", () => {
     expect(() => parseHourly({ latitude: 45 })).toThrow(OpenMeteoResponseError);
+  });
+});
+
+describe("buildHistoryUrl", () => {
+  it("asks for past days, not forecast days", () => {
+    const url = buildHistoryUrl("45.1", "5.8", "", 45);
+    expect(url).toContain("past_days=45");
+    // Zero is refused by the API, and the extra day costs nothing: the consumer
+    // bounds its own window.
+    expect(url).toContain("forecast_days=1");
+  });
+
+  it("carries the same hourly variables as the forward series", () => {
+    const url = buildHistoryUrl("45.1", "5.8", "", 45);
+    expect(url).toContain("direct_radiation");
+    expect(url).toContain("diffuse_radiation");
+    expect(url).toContain("temperature_2m");
+  });
+
+  it("pins the model when one is configured, and omits it otherwise", () => {
+    expect(buildHistoryUrl("45.1", "5.8", "arome_france", 45)).toContain("models=arome_france");
+    expect(buildHistoryUrl("45.1", "5.8", "", 45)).not.toContain("models=");
+  });
+});
+
+describe("daylightOnly", () => {
+  const hour = (direct: number | null, diffuse: number | null) => ({
+    t: "2026-08-24T12:00:00.000Z",
+    direct,
+    diffuse,
+    temp: 20,
+  });
+
+  it("keeps an hour with any irradiance at all", () => {
+    expect(daylightOnly([hour(600, 100)])).toHaveLength(1);
+    expect(daylightOnly([hour(0, 80)])).toHaveLength(1);
+    expect(daylightOnly([hour(40, 0)])).toHaveLength(1);
+  });
+
+  it("drops the night, which teaches a PV model nothing", () => {
+    expect(daylightOnly([hour(0, 0)])).toHaveLength(0);
+  });
+
+  it("drops an hour with no reading rather than treating null as sunlight", () => {
+    expect(daylightOnly([hour(null, null)])).toHaveLength(0);
+  });
+
+  it("cuts a full day to its daylight hours", () => {
+    const day = Array.from({ length: 24 }, (_, h) =>
+      hour(h >= 7 && h <= 19 ? 300 : 0, h >= 7 && h <= 19 ? 90 : 0),
+    );
+    expect(daylightOnly(day)).toHaveLength(13);
   });
 });

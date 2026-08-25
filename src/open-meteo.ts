@@ -116,6 +116,45 @@ export function buildHourlyUrl(
   return `${DAILY_BASE_URL}?${params.toString()}`;
 }
 
+/**
+ * The same hourly variables, over past days instead of future ones (spec 161).
+ *
+ * `past_days` on the forecast endpoint, deliberately, rather than the archive
+ * endpoint: the archive serves a reanalysis, while this returns what the same
+ * forecast model itself said. A PV model fitted on reanalysis would be fitted on
+ * an input distribution it never sees in operation.
+ *
+ * `forecast_days=1` because zero is refused; the extra day is harmless, the
+ * consumer bounds its own window.
+ */
+export function buildHistoryUrl(
+  latitude: string,
+  longitude: string,
+  model: string,
+  pastDays: number,
+): string {
+  const params = new URLSearchParams({
+    latitude,
+    longitude,
+    hourly: HOURLY_VARIABLES.join(","),
+    timezone: "auto",
+    past_days: String(pastDays),
+    forecast_days: "1",
+  });
+  if (model) params.set("models", model);
+  return `${DAILY_BASE_URL}?${params.toString()}`;
+}
+
+/**
+ * Keep only hours the sun was up.
+ *
+ * 45 days of every hour is about 2 200 points; the ones with no irradiance at
+ * all teach a PV model nothing and are two thirds of the payload.
+ */
+export function daylightOnly(hours: readonly HourlyPoint[]): HourlyPoint[] {
+  return hours.filter((h) => (h.direct ?? 0) > 0 || (h.diffuse ?? 0) > 0);
+}
+
 export function buildEnsembleUrl(
   latitude: string,
   longitude: string,
