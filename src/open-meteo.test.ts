@@ -169,6 +169,38 @@ describe("buildHourlyUrl", () => {
 });
 
 describe("parseHourly", () => {
+  it("emits UTC instants, not the offset-less local strings Open-Meteo returns", () => {
+    // The fixture carries utc_offset_seconds 7200 and times like
+    // "2026-08-25T00:00". Passed through, a reader in UTC would place them two
+    // hours late and pair every production sample with the wrong hour.
+    const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
+    for (const h of hours) expect(h.t.endsWith("Z")).toBe(true);
+    expect(hours[0].t).toBe("2026-08-24T22:00:00.000Z");
+  });
+
+  it("applies the offset rather than assuming the reader's timezone", () => {
+    const hours = parseHourly({
+      utc_offset_seconds: 7200,
+      hourly: { time: ["2026-08-25T12:00"], direct_radiation: [500] },
+    });
+    expect(hours[0].t).toBe("2026-08-25T10:00:00.000Z");
+  });
+
+  it("treats a missing offset as UTC rather than guessing", () => {
+    const hours = parseHourly({
+      hourly: { time: ["2026-08-25T12:00"], direct_radiation: [500] },
+    });
+    expect(hours[0].t).toBe("2026-08-25T12:00:00.000Z");
+  });
+
+  it("handles a negative offset", () => {
+    const hours = parseHourly({
+      utc_offset_seconds: -14400,
+      hourly: { time: ["2026-08-25T12:00"], direct_radiation: [500] },
+    });
+    expect(hours[0].t).toBe("2026-08-25T16:00:00.000Z");
+  });
+
   it("flattens the captured payload into one point per hour", () => {
     const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
     expect(hours).toHaveLength(120);
@@ -183,13 +215,13 @@ describe("parseHourly", () => {
   it("keeps the hours in order and spanning five days", () => {
     const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
     const days = new Set(hours.map((h) => h.t.slice(0, 10)));
-    expect(days.size).toBe(5);
+    expect(days.size).toBeGreaterThanOrEqual(5);
     expect(hours[0].t < hours[hours.length - 1].t).toBe(true);
   });
 
   it("reads radiation as zero at night rather than as missing", () => {
     const hours = parseHourly(parseJsonLenient(fixture("irradiance.json")));
-    const night = hours.find((h) => h.t.endsWith("T02:00"));
+    const night = hours.find((h) => h.t.endsWith("T00:00:00.000Z"));
     expect(night?.direct).toBe(0);
     expect(night?.diffuse).toBe(0);
   });
@@ -203,12 +235,18 @@ describe("parseHourly", () => {
         temperature_2m_icon_eu: [18],
       },
     });
-    expect(hours[0]).toEqual({ t: "2026-08-25T00:00", direct: 12, diffuse: 34, temp: 18 });
+    expect(hours[0]).toEqual({
+      t: "2026-08-25T00:00:00.000Z",
+      direct: 12,
+      diffuse: 34,
+      temp: 18,
+    });
   });
 
   it("nulls a variable the response does not carry rather than throwing", () => {
     const hours = parseHourly({ hourly: { time: ["a"], direct_radiation: [5] } });
     expect(hours[0]).toEqual({ t: "a", direct: 5, diffuse: null, temp: null });
+    // An unparseable stamp is passed through rather than turned into an epoch.
   });
 
   it("throws a typed error with no hourly block", () => {

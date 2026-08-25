@@ -149,8 +149,14 @@ const SETTINGS_PREFIX = `integration.${PLUGIN_ID}.`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOURCE_DEVICE_ID = "Weather Forecast"; // Must match friendlyName for updateDeviceData lookup
 const IRRADIANCE_KEY = "irradiance_120h";
-/** Days of hourly irradiance published. 5 x 24 = 120 points, about 4.4 KB. */
-const IRRADIANCE_DAYS = 5;
+/**
+ * Calendar days of hourly irradiance published.
+ *
+ * Six, not five: Open-Meteo counts from today 00:00 local, so `forecast_days=5`
+ * ends at the close of J+4. Reaching the end of J+5, which is what the consumer
+ * asks for, takes six.
+ */
+const IRRADIANCE_DAYS = 6;
 
 // ============================================================
 // Discovered device definition (static)
@@ -184,7 +190,11 @@ function buildForecastDataDefs(): DiscoveredDevice["data"] {
   // Spec 160 — hourly irradiance for the PV production forecast. One `json`
   // point rather than 360 flat bindings: it is a computation input, not
   // something a household reads off a card.
-  data.push({ key: IRRADIANCE_KEY, type: "json", category: "solar_radiation" });
+  // `generic`, not `solar_radiation`: that category's contract expects a number
+  // (`CATEGORY_EXPECTED_TYPE` in the core), so declaring a json series under it
+  // logs a contract warning at every discovery and offers the series as a
+  // binding candidate — the very friction this series exists to avoid.
+  data.push({ key: IRRADIANCE_KEY, type: "json", category: "generic" });
   return data;
 }
 

@@ -47,7 +47,17 @@ export interface DailyResponse {
 }
 
 export interface HourlyPoint {
-  /** Local ISO time, as Open-Meteo returns it. */
+  /**
+   * UTC instant, with an explicit `Z`.
+   *
+   * Open-Meteo answers `timezone=auto` with **offset-less local** timestamps
+   * like `2026-08-25T00:00`, and reports the offset separately. Passing those
+   * through would leave the consumer to parse them, and ECMAScript parses an
+   * offset-less date-time in the *reader's* timezone — so a Sowel container
+   * running UTC would shift a French household's whole curve by two hours and
+   * pair each production sample with the irradiance of a different hour. The
+   * offset is applied here, once, at the boundary that knows it.
+   */
   t: string;
   /** Direct radiation on the HORIZONTAL plane, W/m2. Not normal to the sun. */
   direct: number | null;
@@ -250,6 +260,10 @@ export function parseHourly(json: unknown): HourlyPoint[] {
   if (root.hourly === undefined) {
     throw new OpenMeteoResponseError("Response carries no hourly block");
   }
+  const offsetSeconds =
+    typeof root.utc_offset_seconds === "number" && Number.isFinite(root.utc_offset_seconds)
+      ? root.utc_offset_seconds
+      : 0;
   const hourly = asRecord(root.hourly, "the hourly block");
   const time = Array.isArray(hourly.time) ? hourly.time.map(String) : null;
   if (!time) throw new OpenMeteoResponseError("Hourly block carries no time axis");
@@ -262,10 +276,23 @@ export function parseHourly(json: unknown): HourlyPoint[] {
   const diffuse = pick("diffuse_radiation");
   const temp = pick("temperature_2m");
 
-  return time.map((t, i) => ({
-    t,
+  return time.map((local, i) => ({
+    t: toUtcIso(local, offsetSeconds),
     direct: direct[i] ?? null,
     diffuse: diffuse[i] ?? null,
     temp: temp[i] ?? null,
   }));
+}
+
+/**
+ * An offset-less local timestamp plus the response's offset, as a UTC instant.
+ *
+ * `Date.parse` on a bare `2026-08-25T00:00` is timezone-dependent by
+ * specification, so the string is read as UTC and the offset subtracted
+ * explicitly rather than left to whatever zone the reader happens to run in.
+ */
+function toUtcIso(localIso: string, offsetSeconds: number): string {
+  const asUtc = Date.parse(`${localIso}Z`);
+  if (!Number.isFinite(asUtc)) return localIso;
+  return new Date(asUtc - offsetSeconds * 1000).toISOString();
 }
