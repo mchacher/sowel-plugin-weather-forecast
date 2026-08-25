@@ -52,7 +52,7 @@ Creates a single "Weather Forecast" device with 37 data points.
 | `j1_temp_max_spread` … `j5_temp_max_spread` | number | °C | Full width of the uncertainty band |
 | `j1_confidence` … `j5_confidence` | enum | — | high, medium, low |
 | `model_used` | text | — | The model that fed J+1, or `median(n)` |
-| `irradiance_120h` | json | — | Hourly direct and diffuse radiation and temperature, 5 days |
+| `irradiance_120h` | json | — | Hourly direct and diffuse radiation and temperature, today 00:00 to the end of J+5 |
 
 `jN` is the horizon in days: `j1` is tomorrow, `j5` is in five days. Confidence
 is published for every day. It is not monotonic with the horizon: measured on
@@ -64,7 +64,9 @@ The five original metrics keep the key, type, category and unit they had in
 
 ### The irradiance series
 
-`irradiance_120h` carries 120 hourly points: `direct` and `diffuse` radiation
+`irradiance_120h` carries 144 hourly points (the name is the 120 h of lookahead
+it guarantees; the series starts at today 00:00 local, so six calendar days are
+needed to reach the end of J+5): `direct` and `diffuse` radiation
 separately, plus the air temperature. The split matters — a combined
 `shortwave_radiation` figure cannot be projected onto a tilted plane, which is
 what a PV production forecast needs. Note that `direct` is on the **horizontal**
