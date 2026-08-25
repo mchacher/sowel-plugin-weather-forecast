@@ -40,7 +40,7 @@ deterministic run can give:
 
 ## Data Provided
 
-Creates a single "Weather Forecast" device with 36 data points.
+Creates a single "Weather Forecast" device with 37 data points.
 
 | Data | Type | Unit | Description |
 |---|---|---|---|
@@ -52,6 +52,7 @@ Creates a single "Weather Forecast" device with 36 data points.
 | `j1_temp_max_spread` … `j5_temp_max_spread` | number | °C | Full width of the uncertainty band |
 | `j1_confidence` … `j5_confidence` | enum | — | high, medium, low |
 | `model_used` | text | — | The model that fed J+1, or `median(n)` |
+| `irradiance_120h` | json | — | Hourly direct and diffuse radiation and temperature, today 00:00 to the end of J+5 |
 
 `jN` is the horizon in days: `j1` is tomorrow, `j5` is in five days. Confidence
 is published for every day. It is not monotonic with the horizon: measured on
@@ -60,6 +61,21 @@ so the far days carry real information rather than a foregone verdict.
 
 The five original metrics keep the key, type, category and unit they had in
 1.0.0, so upgrading changes what is behind the numbers, never the bindings.
+
+### The irradiance series
+
+`irradiance_120h` carries 144 hourly points (the name is the 120 h of lookahead
+it guarantees; the series starts at today 00:00 local, so six calendar days are
+needed to reach the end of J+5): `direct` and `diffuse` radiation
+separately, plus the air temperature. The split matters — a combined
+`shortwave_radiation` figure cannot be projected onto a tilted plane, which is
+what a PV production forecast needs. Note that `direct` is on the **horizontal**
+plane, not normal to the sun; converting it is the consumer's job.
+
+One `json` point rather than 360 flat bindings: it is a computation input, not
+something to read off a card. A consumer reads it straight from the device, no
+data binding required. Its absence costs whatever consumes it, never this
+plugin's own forecast.
 
 ## Installation
 

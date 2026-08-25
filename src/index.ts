@@ -22,6 +22,11 @@ import {
   IMPLICIT_MODEL,
   buildDailyUrl,
   buildEnsembleUrl,
+  buildHourlyUrl,
+  buildHistoryUrl,
+  daylightOnly,
+  parseHourly,
+  type HourlyPoint,
   parseDaily,
   parseEnsembleDaily,
   parseJsonLenient,
@@ -145,6 +150,31 @@ const PLUGIN_ID = "weather-forecast";
 const SETTINGS_PREFIX = `integration.${PLUGIN_ID}.`;
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOURCE_DEVICE_ID = "Weather Forecast"; // Must match friendlyName for updateDeviceData lookup
+const IRRADIANCE_KEY = "irradiance_120h";
+
+/**
+ * The past irradiance a PV model can be fitted on straight away (spec 161).
+ *
+ * A separate point from the forward series, refreshed once a day rather than on
+ * every poll: 45 days of daylight hours is about 630 entries, and republishing
+ * that twice an hour alongside its `previous` value would put a quarter of a
+ * megabyte on the wire for data that changes when a day rolls over.
+ */
+const IRRADIANCE_HISTORY_KEY = "irradiance_history";
+
+/** Days of history published. Matches the core's rolling fit window. */
+const HISTORY_DAYS = 45;
+
+/** How often the history is refreshed. */
+const HISTORY_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Calendar days of hourly irradiance published.
+ *
+ * Six, not five: Open-Meteo counts from today 00:00 local, so `forecast_days=5`
+ * ends at the close of J+4. Reaching the end of J+5, which is what the consumer
+ * asks for, takes six.
+ */
+const IRRADIANCE_DAYS = 6;
 
 // ============================================================
 // Discovered device definition (static)
@@ -175,6 +205,16 @@ function buildForecastDataDefs(): DiscoveredDevice["data"] {
     );
   }
   data.push({ key: "model_used", type: "text", category: "generic" });
+  // Spec 160 — hourly irradiance for the PV production forecast. One `json`
+  // point rather than 360 flat bindings: it is a computation input, not
+  // something a household reads off a card.
+  // `generic`, not `solar_radiation`: that category's contract expects a number
+  // (`CATEGORY_EXPECTED_TYPE` in the core), so declaring a json series under it
+  // logs a contract warning at every discovery and offers the series as a
+  // binding candidate — the very friction this series exists to avoid.
+  data.push({ key: IRRADIANCE_KEY, type: "json", category: "generic" });
+  // Spec 161 — the same shape, over the past instead of the future.
+  data.push({ key: IRRADIANCE_HISTORY_KEY, type: "json", category: "generic" });
   return data;
 }
 
@@ -205,6 +245,8 @@ class WeatherForecastPlugin implements IntegrationPlugin {
   // Polling state
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private lastPollAt: string | null = null;
+  /** When the 45-day history was last published, so it is refreshed daily. */
+  private lastHistoryAt = 0;
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MIN * 60 * 1000;
 
   // Resolution state (spec 159)
@@ -383,7 +425,37 @@ class WeatherForecastPlugin implements IntegrationPlugin {
 
       this.deviceManager.upsertFromDiscovery(PLUGIN_ID, SOURCE_DEVICE_ID, WEATHER_DISCOVERED_DEVICE);
 
-      const payload = buildForecastPayload(daily, ensemble, this.thresholds);
+      const payload: Record<string, unknown> = buildForecastPayload(
+        daily,
+        ensemble,
+        this.thresholds,
+      );
+
+      // The irradiance series is an enrichment like the ensemble: its absence
+      // costs the PV forecast downstream, never this poll.
+      const irradiance = await this.fetchHourlySafely(lat, lon);
+      if (irradiance) {
+        payload[IRRADIANCE_KEY] = {
+          issuedAt: new Date().toISOString(),
+          model: this.models.length === 1 ? this.models[0] : IMPLICIT_MODEL,
+          hours: irradiance,
+        };
+      }
+
+      // Spec 161 — the past series, at most once a day. Its absence costs a
+      // household the ability to fit a model straight away, never this poll.
+      if (Date.now() - this.lastHistoryAt >= HISTORY_INTERVAL_MS) {
+        const history = await this.fetchHistorySafely(lat, lon);
+        if (history) {
+          payload[IRRADIANCE_HISTORY_KEY] = {
+            issuedAt: new Date().toISOString(),
+            model: this.models.length === 1 ? this.models[0] : IMPLICIT_MODEL,
+            hours: history,
+          };
+          this.lastHistoryAt = Date.now();
+        }
+      }
+
       this.deviceManager.updateDeviceData(PLUGIN_ID, SOURCE_DEVICE_ID, payload);
 
       this.lastPollAt = new Date().toISOString();
@@ -397,6 +469,7 @@ class WeatherForecastPlugin implements IntegrationPlugin {
           j1TempMax: payload.j1_temp_max,
           j1RainProb: payload.j1_rain_prob,
           j1Confidence: payload.j1_confidence,
+          irradianceHours: irradiance?.length ?? 0,
         },
         "Weather Forecast poll complete",
       );
@@ -438,6 +511,50 @@ class WeatherForecastPlugin implements IntegrationPlugin {
         "Multi-model forecast request failed, falling back to best_match",
       );
       return parseDaily(await this.fetchJson(buildDailyUrl(lat, lon, [], days)));
+    }
+  }
+
+  /**
+   * Never throws: the series feeds a downstream consumer (spec 160), it is not
+   * needed by anything this plugin publishes itself.
+   *
+   * Single model on purpose, and `best_match` by default: a consumer projecting
+   * the beam onto a tilted plane needs one coherent series. Spec 160 measured
+   * that the irradiance forecast is not the accuracy bottleneck anyway.
+   */
+  private async fetchHourlySafely(lat: string, lon: string): Promise<HourlyPoint[] | null> {
+    try {
+      const model = this.models.length === 1 ? this.models[0] : "";
+      const url = buildHourlyUrl(lat, lon, model, IRRADIANCE_DAYS);
+      const hours = parseHourly(await this.fetchJson(url));
+      return hours.length > 0 ? hours : null;
+    } catch (err) {
+      this.logger.warn(
+        { err },
+        "Hourly irradiance request failed, forecast continues without the series",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * The past 45 days of daylight irradiance (spec 161).
+   *
+   * Never throws, for the same reason as its forward twin: a household that
+   * cannot reach Open-Meteo for the history still gets today's forecast.
+   */
+  private async fetchHistorySafely(lat: string, lon: string): Promise<HourlyPoint[] | null> {
+    try {
+      const model = this.models.length === 1 ? this.models[0] : "";
+      const url = buildHistoryUrl(lat, lon, model, HISTORY_DAYS);
+      const hours = daylightOnly(parseHourly(await this.fetchJson(url)));
+      return hours.length > 0 ? hours : null;
+    } catch (err) {
+      this.logger.warn(
+        { err },
+        "Irradiance history request failed, the forecast is unaffected",
+      );
+      return null;
     }
   }
 

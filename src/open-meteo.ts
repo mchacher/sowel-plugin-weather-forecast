@@ -19,6 +19,20 @@ export const DAILY_VARIABLES = [
   "precipitation_probability_max",
 ] as const;
 
+/**
+ * Hourly variables for the irradiance series (spec 160).
+ *
+ * `direct_radiation` and `diffuse_radiation` separately, never the combined
+ * `shortwave_radiation`: the split is what lets a consumer project the beam onto
+ * a tilted plane. AROME HD carries none of the three, which is one more reason
+ * the 2.5 km variant is the one in the candidate list.
+ */
+export const HOURLY_VARIABLES = [
+  "direct_radiation",
+  "diffuse_radiation",
+  "temperature_2m",
+] as const;
+
 /** Daily variables requested from the ensemble endpoint. */
 export const ENSEMBLE_VARIABLES = ["temperature_2m_max", "precipitation_sum"] as const;
 
@@ -30,6 +44,27 @@ export interface DailyResponse {
   time: string[];
   /** model id -> variable -> values aligned on `time`. */
   byModel: Record<string, Record<string, (number | null)[]>>;
+}
+
+export interface HourlyPoint {
+  /**
+   * UTC instant, with an explicit `Z`.
+   *
+   * Open-Meteo answers `timezone=auto` with **offset-less local** timestamps
+   * like `2026-08-25T00:00`, and reports the offset separately. Passing those
+   * through would leave the consumer to parse them, and ECMAScript parses an
+   * offset-less date-time in the *reader's* timezone — so a Sowel container
+   * running UTC would shift a French household's whole curve by two hours and
+   * pair each production sample with the irradiance of a different hour. The
+   * offset is applied here, once, at the boundary that knows it.
+   */
+  t: string;
+  /** Direct radiation on the HORIZONTAL plane, W/m2. Not normal to the sun. */
+  direct: number | null;
+  /** Diffuse radiation, W/m2. */
+  diffuse: number | null;
+  /** Air temperature, °C. */
+  temp: number | null;
 }
 
 export interface EnsembleResponse {
@@ -62,6 +97,62 @@ export function buildDailyUrl(
   // An empty model list means "let Open-Meteo pick", i.e. the pre-2.0 behaviour.
   if (models.length > 0) params.set("models", models.join(","));
   return `${DAILY_BASE_URL}?${params.toString()}`;
+}
+
+export function buildHourlyUrl(
+  latitude: string,
+  longitude: string,
+  model: string,
+  forecastDays: number,
+): string {
+  const params = new URLSearchParams({
+    latitude,
+    longitude,
+    hourly: HOURLY_VARIABLES.join(","),
+    timezone: "auto",
+    forecast_days: String(forecastDays),
+  });
+  if (model) params.set("models", model);
+  return `${DAILY_BASE_URL}?${params.toString()}`;
+}
+
+/**
+ * The same hourly variables, over past days instead of future ones (spec 161).
+ *
+ * `past_days` on the forecast endpoint, deliberately, rather than the archive
+ * endpoint: the archive serves a reanalysis, while this returns what the same
+ * forecast model itself said. A PV model fitted on reanalysis would be fitted on
+ * an input distribution it never sees in operation.
+ *
+ * `forecast_days=1` because zero is refused; the extra day is harmless, the
+ * consumer bounds its own window.
+ */
+export function buildHistoryUrl(
+  latitude: string,
+  longitude: string,
+  model: string,
+  pastDays: number,
+): string {
+  const params = new URLSearchParams({
+    latitude,
+    longitude,
+    hourly: HOURLY_VARIABLES.join(","),
+    timezone: "auto",
+    past_days: String(pastDays),
+    forecast_days: "1",
+  });
+  if (model) params.set("models", model);
+  return `${DAILY_BASE_URL}?${params.toString()}`;
+}
+
+/**
+ * Keep only hours the sun was up.
+ *
+ * 45 days of every hour is about 2 200 points; the ones with no irradiance at
+ * all teach a PV model nothing and are two thirds of the payload.
+ */
+export function daylightOnly(hours: readonly HourlyPoint[]): HourlyPoint[] {
+  return hours.filter((h) => (h.direct ?? 0) > 0 || (h.diffuse ?? 0) > 0);
 }
 
 export function buildEnsembleUrl(
@@ -191,4 +282,56 @@ export function parseEnsembleDaily(json: unknown): EnsembleResponse {
   }
 
   return { time, members };
+}
+
+/**
+ * Flatten the hourly block into one point per hour.
+ *
+ * Single-model on purpose: a consumer projecting the beam onto a plane needs one
+ * coherent series, not a choice to make at every hour. Spec 160 measured that
+ * the irradiance forecast is not the bottleneck anyway — feeding the production
+ * model the analysis instead of the 24 h forecast barely moved its error.
+ */
+export function parseHourly(json: unknown): HourlyPoint[] {
+  const root = asRecord(json, "the response");
+  assertNoApiError(root);
+
+  if (root.hourly === undefined) {
+    throw new OpenMeteoResponseError("Response carries no hourly block");
+  }
+  const offsetSeconds =
+    typeof root.utc_offset_seconds === "number" && Number.isFinite(root.utc_offset_seconds)
+      ? root.utc_offset_seconds
+      : 0;
+  const hourly = asRecord(root.hourly, "the hourly block");
+  const time = Array.isArray(hourly.time) ? hourly.time.map(String) : null;
+  if (!time) throw new OpenMeteoResponseError("Hourly block carries no time axis");
+
+  const pick = (variable: string): (number | null)[] => {
+    const key = Object.keys(hourly).find((k) => k === variable || k.startsWith(`${variable}_`));
+    return (key ? toSeries(hourly[key]) : null) ?? [];
+  };
+  const direct = pick("direct_radiation");
+  const diffuse = pick("diffuse_radiation");
+  const temp = pick("temperature_2m");
+
+  return time.map((local, i) => ({
+    t: toUtcIso(local, offsetSeconds),
+    direct: direct[i] ?? null,
+    diffuse: diffuse[i] ?? null,
+    temp: temp[i] ?? null,
+  }));
+}
+
+/**
+ * An offset-less local timestamp plus the response's offset, as a UTC instant.
+ *
+ * `Date.parse` on a bare `2026-08-25T00:00` is timezone-dependent by
+ * specification, so the string is read as UTC and the offset subtracted
+ * explicitly rather than left to whatever zone the reader happens to run in.
+ */
+function toUtcIso(localIso: string, offsetSeconds: number): string {
+  const asUtc = Date.parse(`${localIso}Z`);
+  if (!Number.isFinite(asUtc)) return localIso;
+  return new Date(asUtc - offsetSeconds * 1000).toISOString();
 }
